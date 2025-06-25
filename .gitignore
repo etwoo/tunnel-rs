@@ -1,0 +1,9 @@
+/target
+
+#
+# Let dependencies float, i.e. don't pin dependencies. For background, see:
+#
+#   https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html
+#   https://blog.rust-lang.org/2023/08/29/committing-lockfiles/
+#
+/Cargo.lock
