@@ -92,6 +92,18 @@ impl TunnelCellVisitor for DemoPlayer {
     }
 }
 
+fn demo_step(t: &mut Tunnel, timeout: Duration) -> tunnel::Result {
+    thread::sleep(timeout);
+    let mut demo = DemoPlayer::new();
+    t.accept(&mut demo)?;
+    if demo.player > demo.get_safe_goal() {
+        t.move_player_left()
+    } else if demo.player < demo.get_safe_goal() {
+        t.move_player_right()
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct QuitError {}
 
@@ -103,8 +115,8 @@ impl Display for QuitError {
 
 impl Error for QuitError {}
 
-fn read_events(t: &mut Tunnel) -> tunnel::Result {
-    if event::poll(Duration::from_secs(1))? {
+fn keyboard_step(t: &mut Tunnel, timeout: Duration) -> tunnel::Result {
+    if event::poll(timeout)? {
         if let Ok(event) = event::read() {
             if let Some(key) = event.as_key_press_event() {
                 match key.code {
@@ -131,17 +143,17 @@ enum PlayerType {
 }
 
 fn main() -> tunnel::Result {
-    let player_type = if env::args().any(|x| x == "--demo") {
-        PlayerType::SelfDemo
+    let (player_type, timeout) = if env::args().any(|x| x == "--demo") {
+        (PlayerType::SelfDemo, Duration::from_millis(100))
     } else {
-        PlayerType::Keyboard
+        (PlayerType::Keyboard, Duration::from_secs(1))
     };
 
     let game_over_message;
     let mut game_score = 0;
 
-    let mut builder = SimpleBuilder { rng: rand::rng() };
-    let mut printer = SimplePrinter {
+    let mut level_builder = SimpleBuilder { rng: rand::rng() };
+    let mut terminal_printer = SimplePrinter {
         stdout: io::stdout(),
     };
 
@@ -149,41 +161,34 @@ fn main() -> tunnel::Result {
     terminal::enable_raw_mode()?;
     crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
 
-    let mut t = Tunnel::new(&mut builder, rows, columns);
+    let mut game_state = Tunnel::new(&mut level_builder, rows, columns);
     loop {
-        printer.stdout.queue(Clear(ClearType::All))?;
-        t.accept(&mut printer)?;
-        printer.stdout.queue(cursor::MoveTo(0, rows - 1))?;
-        printer
+        terminal_printer.stdout.queue(Clear(ClearType::All))?;
+        game_state.accept(&mut terminal_printer)?;
+        terminal_printer.stdout.queue(cursor::MoveTo(0, rows - 1))?;
+        terminal_printer
             .stdout
             .queue(PrintStyledContent(format!("{game_score}").green()))?;
-        printer.stdout.flush()?;
+        terminal_printer.stdout.flush()?;
 
         match player_type {
             PlayerType::SelfDemo => {
-                thread::sleep(Duration::from_millis(100));
                 if game_score == 200 {
                     game_over_message = "Demo complete!".to_string();
                     break;
                 }
-                let mut demo = DemoPlayer::new();
-                t.accept(&mut demo)?;
-                if demo.player > demo.get_safe_goal() {
-                    t.move_player_left()
-                } else if demo.player < demo.get_safe_goal() {
-                    t.move_player_right()
-                }
+                demo_step(&mut game_state, timeout)?;
             }
             PlayerType::Keyboard => {
-                if let Err(e) = read_events(&mut t) {
+                if let Err(e) = keyboard_step(&mut game_state, timeout) {
                     game_over_message = format!("Quitting because {e} ...");
                     break;
                 }
             }
         }
 
-        t.step(&mut builder);
-        if t.is_collision() {
+        game_state.step(&mut level_builder);
+        if game_state.is_collision() {
             game_over_message = "Game over!".to_string();
             break;
         }
