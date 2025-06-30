@@ -11,32 +11,10 @@ fn rows_to_loop_iterations(rows: u16) -> u16 {
     rows.saturating_sub(3)
 }
 
-#[derive(Clone, Copy)]
-struct Walls {
-    left_wall: u16,
-    gap_to_right_wall: u16,
-}
-
-impl Walls {
-    fn in_wall(&self, column: u16) -> bool {
-        column <= self.left_wall
-            || column > self.left_wall + self.gap_to_right_wall
-    }
-    fn cell_type(&self, player: u16, row: u16, column: u16) -> TunnelCellType {
-        if row == 0 && column == player {
-            TunnelCellType::Player
-        } else if self.in_wall(column) {
-            TunnelCellType::Wall
-        } else {
-            TunnelCellType::Floor
-        }
-    }
-}
-
 pub struct Tunnel {
     player: u16,
     screen_width: u16,
-    walls: VecDeque<Walls>,
+    walls: VecDeque<TunnelWalls>,
 }
 
 impl Tunnel {
@@ -76,7 +54,7 @@ impl Tunnel {
 
     fn guarantee_row_precondition(&mut self) {
         if self.walls.is_empty() {
-            self.walls.push_back(Walls {
+            self.walls.push_back(TunnelWalls {
                 left_wall: 0,
                 gap_to_right_wall: self.screen_width.saturating_sub(2),
             });
@@ -133,7 +111,7 @@ type TunnelIteratorItem = (u16, u16, TunnelCellType);
 
 pub struct TunnelIterator<'a> {
     player: u16,
-    rows: Peekable<Enumerate<vec_deque::Iter<'a, Walls>>>,
+    rows: Peekable<Enumerate<vec_deque::Iter<'a, TunnelWalls>>>,
     cols: Peekable<Cycle<Range<u16>>>,
 }
 
@@ -162,6 +140,28 @@ impl Iterator for TunnelIterator<'_> {
     type Item = TunnelIteratorItem;
     fn next(&mut self) -> Option<Self::Item> {
         self.choose()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TunnelWalls {
+    left_wall: u16,
+    gap_to_right_wall: u16,
+}
+
+impl TunnelWalls {
+    fn in_wall(&self, column: u16) -> bool {
+        column <= self.left_wall
+            || column > self.left_wall + self.gap_to_right_wall
+    }
+    fn cell_type(&self, player: u16, row: u16, column: u16) -> TunnelCellType {
+        if row == 0 && column == player {
+            TunnelCellType::Player
+        } else if self.in_wall(column) {
+            TunnelCellType::Wall
+        } else {
+            TunnelCellType::Floor
+        }
     }
 }
 
