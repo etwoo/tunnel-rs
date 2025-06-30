@@ -11,13 +11,10 @@ use std::cmp;
 use std::env;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::io::{self, Stdout, Write};
+use std::io::{self, Write};
 use std::thread;
 use std::time::Duration;
-use tunnel::{
-    Tunnel, TunnelBuilder, TunnelBuilderChoice, TunnelCellType,
-    TunnelCellVisitor,
-};
+use tunnel::{Tunnel, TunnelBuilder, TunnelBuilderChoice, TunnelCellType};
 
 struct SimpleBuilder {
     rng: ThreadRng,
@@ -36,72 +33,56 @@ impl TunnelBuilder for SimpleBuilder {
     }
 }
 
-struct SimplePrinter {
-    stdout: Stdout,
-}
-
-impl TunnelCellVisitor for SimplePrinter {
-    fn visit(&mut self, x: u16, y: u16, typ: TunnelCellType) -> tunnel::Result {
-        self.stdout.queue(cursor::MoveTo(y, x))?;
-        match typ {
+fn display(t: &Tunnel, score_row: u16, game_score: u64) -> tunnel::Result {
+    let mut stdout = io::stdout();
+    stdout.queue(Clear(ClearType::All))?;
+    for (row, col, cell_type) in t.iter() {
+        stdout.queue(cursor::MoveTo(col, row))?;
+        match cell_type {
             TunnelCellType::Player => {
-                self.stdout.queue(PrintStyledContent("v".green()))?;
+                stdout.queue(PrintStyledContent("v".green()))?;
             }
             TunnelCellType::Floor => {
-                self.stdout.queue(PrintStyledContent(" ".reset()))?;
+                stdout.queue(PrintStyledContent(" ".reset()))?;
             }
             TunnelCellType::Wall => {
-                self.stdout.queue(PrintStyledContent("O".reset()))?;
+                stdout.queue(PrintStyledContent("O".reset()))?;
             }
         }
-        Ok(())
     }
+    stdout.queue(cursor::MoveTo(0, score_row))?;
+    stdout.queue(PrintStyledContent(format!("{game_score}").green()))?;
+    stdout.flush()?;
+    Ok(())
 }
 
-struct DemoPlayer {
-    player: u16,
-    safe_left: u16,
-    safe_right: u16,
-}
-
-impl DemoPlayer {
-    fn new() -> DemoPlayer {
-        DemoPlayer {
-            player: 0,
-            safe_left: u16::MAX,
-            safe_right: 0,
-        }
-    }
-    fn get_safe_goal(&self) -> u16 {
-        self.safe_left + self.safe_right.saturating_sub(self.safe_left) / 2
-    }
-}
-
-impl TunnelCellVisitor for DemoPlayer {
-    fn visit(&mut self, x: u16, y: u16, typ: TunnelCellType) -> tunnel::Result {
-        if typ == TunnelCellType::Player || typ == TunnelCellType::Floor {
-            if typ == TunnelCellType::Player {
-                self.player = y;
-            }
-            if x == 1 {
-                self.safe_left = cmp::min(self.safe_left, y);
-                self.safe_right = cmp::max(self.safe_right, y);
-            }
-        }
-        Ok(())
-    }
-}
-
-fn demo_step(t: &mut Tunnel, timeout: Duration) -> tunnel::Result {
+fn demo_step(t: &mut Tunnel, timeout: Duration) {
     thread::sleep(timeout);
-    let mut demo = DemoPlayer::new();
-    t.accept(&mut demo)?;
-    if demo.player > demo.get_safe_goal() {
+
+    let mut player = 0;
+    let mut safe_min = u16::MAX;
+    let mut safe_max = 0;
+
+    for (row, col, cell_type) in t.iter() {
+        if cell_type == TunnelCellType::Player {
+            player = col;
+        }
+        if row == 1
+            && (cell_type == TunnelCellType::Player
+                || cell_type == TunnelCellType::Floor)
+        {
+            safe_min = cmp::min(safe_min, col);
+            safe_max = cmp::max(safe_max, col);
+        }
+    }
+
+    let safe_goal = safe_min + safe_max.saturating_sub(safe_min) / 2;
+
+    if player > safe_goal {
         t.move_player_left()
-    } else if demo.player < demo.get_safe_goal() {
+    } else if player < safe_goal {
         t.move_player_right()
     }
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -116,22 +97,21 @@ impl Display for QuitError {
 impl Error for QuitError {}
 
 fn keyboard_step(t: &mut Tunnel, timeout: Duration) -> tunnel::Result {
-    if event::poll(timeout)? {
-        if let Ok(event) = event::read() {
-            if let Some(key) = event.as_key_press_event() {
-                match key.code {
-                    KeyCode::Char('c' | 'q') => {
-                        return Err(Box::new(QuitError {}));
-                    }
-                    KeyCode::Left => {
-                        t.move_player_left();
-                    }
-                    KeyCode::Right => {
-                        t.move_player_right();
-                    }
-                    _ => {}
-                }
+    if event::poll(timeout)?
+        && let Ok(event) = event::read()
+        && let Some(key) = event.as_key_press_event()
+    {
+        match key.code {
+            KeyCode::Char('c' | 'q') => {
+                return Err(Box::new(QuitError {}));
             }
+            KeyCode::Left => {
+                t.move_player_left();
+            }
+            KeyCode::Right => {
+                t.move_player_right();
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -153,9 +133,6 @@ fn main() -> tunnel::Result {
     let mut game_score = 0;
 
     let mut level_builder = SimpleBuilder { rng: rand::rng() };
-    let mut terminal_printer = SimplePrinter {
-        stdout: io::stdout(),
-    };
 
     let (columns, rows) = terminal::size()?;
     terminal::enable_raw_mode()?;
@@ -163,13 +140,7 @@ fn main() -> tunnel::Result {
 
     let mut game_state = Tunnel::new(&mut level_builder, rows, columns);
     loop {
-        terminal_printer.stdout.queue(Clear(ClearType::All))?;
-        game_state.accept(&mut terminal_printer)?;
-        terminal_printer.stdout.queue(cursor::MoveTo(0, rows - 1))?;
-        terminal_printer
-            .stdout
-            .queue(PrintStyledContent(format!("{game_score}").green()))?;
-        terminal_printer.stdout.flush()?;
+        display(&game_state, rows - 1, game_score)?;
 
         match player_type {
             PlayerType::SelfDemo => {
@@ -177,7 +148,7 @@ fn main() -> tunnel::Result {
                     game_over_message = "Demo complete!".to_string();
                     break;
                 }
-                demo_step(&mut game_state, timeout)?;
+                demo_step(&mut game_state, timeout);
             }
             PlayerType::Keyboard => {
                 if let Err(e) = keyboard_step(&mut game_state, timeout) {

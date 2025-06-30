@@ -1,7 +1,9 @@
 // https://github.com/taiki-e/cargo-llvm-cov#exclude-code-from-coverage
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-use std::collections::VecDeque;
+use core::ops::Range;
+use std::collections::{VecDeque, vec_deque};
+use std::iter::{Cycle, Enumerate, Peekable};
 
 pub type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -9,23 +11,10 @@ fn rows_to_loop_iterations(rows: u16) -> u16 {
     rows.saturating_sub(3)
 }
 
-#[derive(Clone)]
-struct Walls {
-    left_wall: u16,
-    gap_to_right_wall: u16,
-}
-
-impl Walls {
-    fn in_wall(&self, column: u16) -> bool {
-        column <= self.left_wall
-            || column > self.left_wall + self.gap_to_right_wall
-    }
-}
-
 pub struct Tunnel {
     player: u16,
     screen_width: u16,
-    walls: VecDeque<Walls>,
+    walls: VecDeque<TunnelWalls>,
 }
 
 impl Tunnel {
@@ -44,7 +33,7 @@ impl Tunnel {
 
     fn add_one_row(&mut self, b: &mut impl TunnelBuilder) {
         self.guarantee_row_precondition();
-        let mut new_row = self.walls.back().unwrap().clone();
+        let mut new_row = *self.walls.back().unwrap();
         if new_row.gap_to_right_wall > 1 {
             new_row.gap_to_right_wall -= 1;
         }
@@ -65,7 +54,7 @@ impl Tunnel {
 
     fn guarantee_row_precondition(&mut self) {
         if self.walls.is_empty() {
-            self.walls.push_back(Walls {
+            self.walls.push_back(TunnelWalls {
                 left_wall: 0,
                 gap_to_right_wall: self.screen_width.saturating_sub(2),
             });
@@ -92,20 +81,12 @@ impl Tunnel {
         self.walls.pop_front();
     }
 
-    pub fn accept(&self, v: &mut impl TunnelCellVisitor) -> Result {
-        for (row, wall) in self.walls.iter().enumerate() {
-            for column in 0..self.screen_width {
-                let cell_type = if row == 0 && column == self.player {
-                    TunnelCellType::Player
-                } else if wall.in_wall(column) {
-                    TunnelCellType::Wall
-                } else {
-                    TunnelCellType::Floor
-                };
-                v.visit(row.try_into().unwrap_or(u16::MAX), column, cell_type)?;
-            }
+    pub fn iter<'a>(&'a self) -> TunnelIterator<'a> {
+        TunnelIterator {
+            player: self.player,
+            rows: self.walls.iter().enumerate().peekable(),
+            cols: (0..self.screen_width).cycle().peekable(),
         }
-        Ok(())
     }
 }
 
@@ -126,16 +107,68 @@ pub enum TunnelCellType {
     Wall,
 }
 
-pub trait TunnelCellVisitor {
-    fn visit(&mut self, x: u16, y: u16, typ: TunnelCellType) -> Result;
+type TunnelIteratorItem = (u16, u16, TunnelCellType);
+
+pub struct TunnelIterator<'a> {
+    player: u16,
+    rows: Peekable<Enumerate<vec_deque::Iter<'a, TunnelWalls>>>,
+    cols: Peekable<Cycle<Range<u16>>>,
+}
+
+impl TunnelIterator<'_> {
+    fn choose(&mut self) -> Option<TunnelIteratorItem> {
+        match self.rows.peek() {
+            Some(&(row_as_usize, walls)) => {
+                let item = match self.cols.next() {
+                    Some(col) => {
+                        let row = row_as_usize.try_into().unwrap_or(u16::MAX);
+                        Some((row, col, walls.cell_type(self.player, row, col)))
+                    }
+                    None => None, // edge case: zero-size Cycle
+                };
+                if let Some(0) = self.cols.peek() {
+                    self.rows.next(); // prepare for next row
+                }
+                item
+            }
+            None => None, // consumed all available rows
+        }
+    }
+}
+
+impl Iterator for TunnelIterator<'_> {
+    type Item = TunnelIteratorItem;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.choose()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TunnelWalls {
+    left_wall: u16,
+    gap_to_right_wall: u16,
+}
+
+impl TunnelWalls {
+    fn in_wall(&self, column: u16) -> bool {
+        column <= self.left_wall
+            || column > self.left_wall + self.gap_to_right_wall
+    }
+    fn cell_type(&self, player: u16, row: u16, column: u16) -> TunnelCellType {
+        if row == 0 && column == player {
+            TunnelCellType::Player
+        } else if self.in_wall(column) {
+            TunnelCellType::Wall
+        } else {
+            TunnelCellType::Floor
+        }
+    }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use std::error::Error;
-    use std::fmt::{self, Display, Formatter};
 
     struct MoveWallsPeriodically {
         b: bool,
@@ -177,16 +210,11 @@ mod tests {
         }
     }
 
-    struct GetFirstRow {
-        cells: Vec<TunnelCellType>,
-    }
-    impl TunnelCellVisitor for GetFirstRow {
-        fn visit(&mut self, x: u16, _y: u16, typ: TunnelCellType) -> Result {
-            if x == 0 {
-                self.cells.push(typ);
-            }
-            Ok(())
-        }
+    fn get_first_row(t: &Tunnel) -> Vec<TunnelCellType> {
+        t.iter()
+            .filter(|(row, _, _)| *row == 0)
+            .map(|(_, _, cell_type)| cell_type)
+            .collect()
     }
 
     const SIZE: u16 = 5;
@@ -194,8 +222,6 @@ mod tests {
 
     #[test]
     fn always_move_left_wall() {
-        let mut first_row = GetFirstRow { cells: Vec::new() };
-
         let mut builder = MoveWallsPeriodically {
             b: true,
             count: 0,
@@ -211,9 +237,7 @@ mod tests {
             TunnelCellType::Player,
             TunnelCellType::Wall,
         ];
-        t.accept(&mut first_row).unwrap();
-        assert_eq!(expected, first_row.cells);
-        first_row.cells.clear();
+        assert_eq!(expected, get_first_row(&t));
 
         for _ in 0..rows_to_loop_iterations(SIZE) {
             t.step(&mut builder);
@@ -227,15 +251,11 @@ mod tests {
             TunnelCellType::Player,
             TunnelCellType::Wall,
         ];
-        t.accept(&mut first_row).unwrap();
-        assert_eq!(expected, first_row.cells);
-        first_row.cells.clear();
+        assert_eq!(expected, get_first_row(&t));
     }
 
     #[test]
     fn always_move_right_wall() {
-        let mut first_row = GetFirstRow { cells: Vec::new() };
-
         let mut builder = MoveWallsPeriodically {
             b: false,
             count: rows_to_loop_iterations(SIZE),
@@ -251,9 +271,7 @@ mod tests {
             TunnelCellType::Floor,
             TunnelCellType::Wall,
         ];
-        t.accept(&mut first_row).unwrap();
-        assert_eq!(expected, first_row.cells);
-        first_row.cells.clear();
+        assert_eq!(expected, get_first_row(&t));
 
         for _ in 0..rows_to_loop_iterations(SIZE) {
             t.step(&mut builder);
@@ -267,15 +285,11 @@ mod tests {
             TunnelCellType::Wall,
             TunnelCellType::Wall,
         ];
-        t.accept(&mut first_row).unwrap();
-        assert_eq!(expected, first_row.cells);
-        first_row.cells.clear();
+        assert_eq!(expected, get_first_row(&t));
     }
 
     #[test]
     fn continue_steps_down_narrow_tunnel() {
-        let mut first_row = GetFirstRow { cells: Vec::new() };
-
         let mut builder = MoveWallsPeriodically {
             b: true,
             count: 0,
@@ -296,9 +310,7 @@ mod tests {
                 TunnelCellType::Player,
                 TunnelCellType::Wall,
             ];
-            t.accept(&mut first_row).unwrap();
-            assert_eq!(expected, first_row.cells);
-            first_row.cells.clear();
+            assert_eq!(expected, get_first_row(&t));
 
             for _ in 0..rows_to_loop_iterations(SIZE) {
                 t.step(&mut builder);
@@ -317,9 +329,7 @@ mod tests {
                 TunnelCellType::Wall,
                 TunnelCellType::Wall,
             ];
-            t.accept(&mut first_row).unwrap();
-            assert_eq!(expected, first_row.cells);
-            first_row.cells.clear();
+            assert_eq!(expected, get_first_row(&t));
 
             for _ in 0..rows_to_loop_iterations(SIZE) {
                 t.move_player_right();
@@ -330,71 +340,48 @@ mod tests {
 
     #[test]
     fn edge_case_size_zero_tunnel_no_underflow() {
-        let mut first_row = GetFirstRow { cells: Vec::new() };
-
         let mut builder = MoveWallsEvenly { b: false };
         let mut t = Tunnel::new(&mut builder, 0, 0);
         assert!(!t.is_collision());
-
-        t.accept(&mut first_row).unwrap();
-        assert!(first_row.cells.is_empty());
+        assert!(get_first_row(&t).is_empty());
 
         t.step(&mut builder);
         assert!(t.is_collision());
-
-        t.accept(&mut first_row).unwrap();
-        assert!(first_row.cells.is_empty());
+        assert!(get_first_row(&t).is_empty());
     }
 
     #[test]
     fn edge_case_size_one_tunnel_no_underflow() {
-        let mut first_row = GetFirstRow { cells: Vec::new() };
-
         let mut builder = MoveWallsEvenly { b: true };
         let mut t = Tunnel::new(&mut builder, 1, 1);
         assert!(!t.is_collision());
-
-        t.accept(&mut first_row).unwrap();
-        assert!(first_row.cells.is_empty());
+        assert!(get_first_row(&t).is_empty());
 
         t.step(&mut builder);
         assert!(t.is_collision());
-
-        t.accept(&mut first_row).unwrap();
-        assert_eq!(vec![TunnelCellType::Player], first_row.cells);
-        first_row.cells.clear();
+        assert_eq!(vec![TunnelCellType::Player], get_first_row(&t));
     }
 
     #[test]
     fn edge_case_size_two_tunnel_no_underflow() {
-        let mut first_row = GetFirstRow { cells: Vec::new() };
-
         let mut builder = MoveWallsEvenly { b: true };
         let mut t = Tunnel::new(&mut builder, 2, 2);
         assert!(!t.is_collision());
-
-        t.accept(&mut first_row).unwrap();
-        assert!(first_row.cells.is_empty());
+        assert!(get_first_row(&t).is_empty());
 
         t.step(&mut builder);
         assert!(t.is_collision());
 
         let expected = vec![TunnelCellType::Wall, TunnelCellType::Player];
-        t.accept(&mut first_row).unwrap();
-        assert_eq!(expected, first_row.cells);
-        first_row.cells.clear();
+        assert_eq!(expected, get_first_row(&t));
     }
 
     #[test]
     fn minimum_valid_size_three_tunnel_no_underflow() {
-        let mut first_row = GetFirstRow { cells: Vec::new() };
-
         let mut builder = MoveWallsEvenly { b: true };
         let mut t = Tunnel::new(&mut builder, 3, 3);
         assert!(!t.is_collision());
-
-        t.accept(&mut first_row).unwrap();
-        assert!(first_row.cells.is_empty());
+        assert!(get_first_row(&t).is_empty());
 
         let expected = vec![
             TunnelCellType::Wall,
@@ -405,38 +392,7 @@ mod tests {
         for _ in 0..REPEAT_STEPS {
             t.step(&mut builder);
             assert!(!t.is_collision());
-
-            t.accept(&mut first_row).unwrap();
-            assert_eq!(expected, first_row.cells);
-            first_row.cells.clear();
+            assert_eq!(expected, get_first_row(&t));
         }
-    }
-
-    #[derive(Debug)]
-    struct VisitorError {}
-
-    impl Display for VisitorError {
-        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            write!(f, "VisitorError for VisitorAlwaysFails")
-        }
-    }
-
-    impl Error for VisitorError {}
-
-    struct VisitorAlwaysFails {}
-    impl TunnelCellVisitor for VisitorAlwaysFails {
-        fn visit(&mut self, _x: u16, _y: u16, _typ: TunnelCellType) -> Result {
-            Err(Box::new(VisitorError {}))
-        }
-    }
-
-    #[test]
-    fn visitor_result_err() {
-        let mut visitor_always_fails = VisitorAlwaysFails {};
-
-        let mut builder = MoveWallsEvenly { b: true };
-        let t = Tunnel::new(&mut builder, SIZE, SIZE);
-
-        assert!(t.accept(&mut visitor_always_fails).is_err());
     }
 }
