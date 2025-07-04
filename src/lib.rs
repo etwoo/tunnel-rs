@@ -1,72 +1,104 @@
 // https://github.com/taiki-e/cargo-llvm-cov#exclude-code-from-coverage
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-use core::ops::Range;
-use std::collections::{VecDeque, vec_deque};
-use std::iter::{Cycle, Enumerate, Peekable};
+use num::iter::Range as NumRange; // clearly distinguish from std::ops::Range
+use num::{FromPrimitive, PrimInt, Unsigned, traits::NumAssign};
+use std::collections::{VecDeque, vec_deque::Iter as VecDequeIterator};
+use std::iter::{Cycle, Peekable, Zip, zip};
 
 pub type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
-fn rows_to_loop_iterations(rows: u16) -> u16 {
-    rows.saturating_sub(3)
+pub trait TunnelIndex:
+    From<u8> + FromPrimitive + NumAssign + PrimInt + Unsigned
+{
+}
+impl TunnelIndex for u8 {}
+impl TunnelIndex for u16 {}
+impl TunnelIndex for u32 {}
+impl TunnelIndex for u64 {}
+impl TunnelIndex for u128 {}
+impl TunnelIndex for usize {}
+
+use num::one;
+use num::zero;
+
+fn two<T: TunnelIndex>() -> T {
+    2.into()
 }
 
-pub struct Tunnel {
-    player: u16,
-    screen_width: u16,
-    walls: VecDeque<TunnelWalls>,
+fn three<T: TunnelIndex>() -> T {
+    3.into()
 }
 
-impl Tunnel {
-    pub fn new(b: &mut impl TunnelBuilder, rows: u16, cols: u16) -> Tunnel {
+fn rows_to_loop_iterations<T: TunnelIndex>(rows: T) -> T {
+    rows.saturating_sub(three())
+}
+
+fn zero_to<T: TunnelIndex>(max: T) -> NumRange<T> {
+    num::range(zero(), max)
+}
+
+pub struct Tunnel<T: TunnelIndex> {
+    player: T,
+    screen_width: T,
+    walls: VecDeque<TunnelWalls<T>>,
+}
+
+impl<T: TunnelIndex> Tunnel<T> {
+    pub fn new(b: &mut impl TunnelBuilder, rows: T, cols: T) -> Tunnel<T> {
         let mut t = Tunnel {
-            player: 0,
+            player: zero(),
             screen_width: cols,
             walls: VecDeque::new(),
         };
         t.player = b.choose_player_start(cols);
-        for _ in 0..rows_to_loop_iterations(rows) {
+        for _ in zero_to(rows_to_loop_iterations(rows)) {
             t.add_one_row(b);
         }
         t
     }
 
     fn add_one_row(&mut self, b: &mut impl TunnelBuilder) {
-        self.guarantee_row_precondition();
-        let mut new_row = *self.walls.back().unwrap();
-        if new_row.gap_to_right_wall > 1 {
-            new_row.gap_to_right_wall -= 1;
+        let mut new_row = self.clone_last_row();
+        if new_row.gap_to_right_wall > one() {
+            new_row.gap_to_right_wall -= one();
         }
         match b.choose_step() {
             TunnelBuilderChoice::MoveLeftWall => {
-                if new_row.left_wall.saturating_add(3) < self.screen_width {
-                    new_row.left_wall += 1;
+                if new_row.left_wall.saturating_add(three()) < self.screen_width
+                {
+                    new_row.left_wall += one();
                 }
             }
             TunnelBuilderChoice::MoveRightWall => {
-                if new_row.gap_to_right_wall == 1 {
-                    new_row.left_wall = new_row.left_wall.saturating_sub(1);
+                if new_row.gap_to_right_wall == one() {
+                    new_row.left_wall = new_row.left_wall.saturating_sub(one());
                 }
             }
         }
         self.walls.push_back(new_row);
     }
 
-    fn guarantee_row_precondition(&mut self) {
-        if self.walls.is_empty() {
-            self.walls.push_back(TunnelWalls {
-                left_wall: 0,
-                gap_to_right_wall: self.screen_width.saturating_sub(2),
-            });
+    fn clone_last_row(&mut self) -> TunnelWalls<T> {
+        match self.walls.back() {
+            Some(n) => n.clone(),
+            None => {
+                let new_row = TunnelWalls {
+                    left_wall: zero(),
+                    gap_to_right_wall: self.screen_width.saturating_sub(two()),
+                };
+                self.walls.push_back(new_row.clone());
+                new_row
+            }
         }
     }
 
     pub fn move_player_left(&mut self) {
-        self.player = self.player.saturating_sub(1);
+        self.player = self.player.saturating_sub(one());
     }
 
     pub fn move_player_right(&mut self) {
-        self.player = self.player.saturating_add(1);
+        self.player = self.player.saturating_add(one());
     }
 
     pub fn is_collision(&self) -> bool {
@@ -81,11 +113,15 @@ impl Tunnel {
         self.walls.pop_front();
     }
 
-    pub fn iter<'a>(&'a self) -> TunnelIterator<'a> {
+    pub fn iter<'a>(&'a self) -> TunnelIterator<'a, T> {
+        let w_len = match FromPrimitive::from_usize(self.walls.len()) {
+            Some(val) => val,
+            None => zero(),
+        };
         TunnelIterator {
             player: self.player,
-            rows: self.walls.iter().enumerate().peekable(),
-            cols: (0..self.screen_width).cycle().peekable(),
+            rows: zip(zero_to(w_len), self.walls.iter()).peekable(),
+            cols: zero_to(self.screen_width).cycle().peekable(),
         }
     }
 }
@@ -96,7 +132,7 @@ pub enum TunnelBuilderChoice {
 }
 
 pub trait TunnelBuilder {
-    fn choose_player_start(&mut self, max: u16) -> u16;
+    fn choose_player_start<T: TunnelIndex>(&mut self, max: T) -> T;
     fn choose_step(&mut self) -> TunnelBuilderChoice;
 }
 
@@ -107,26 +143,28 @@ pub enum TunnelCellType {
     Wall,
 }
 
-type TunnelIteratorItem = (u16, u16, TunnelCellType);
+type TunnelIteratorItem<T> = (T, T, TunnelCellType);
 
-pub struct TunnelIterator<'a> {
-    player: u16,
-    rows: Peekable<Enumerate<vec_deque::Iter<'a, TunnelWalls>>>,
-    cols: Peekable<Cycle<Range<u16>>>,
+pub struct TunnelIterator<'a, T: TunnelIndex> {
+    player: T,
+    rows: Peekable<Zip<NumRange<T>, VecDequeIterator<'a, TunnelWalls<T>>>>,
+    cols: Peekable<Cycle<NumRange<T>>>,
 }
 
-impl TunnelIterator<'_> {
-    fn choose(&mut self) -> Option<TunnelIteratorItem> {
+impl<T: TunnelIndex> Iterator for TunnelIterator<'_, T> {
+    type Item = TunnelIteratorItem<T>;
+    fn next(&mut self) -> Option<Self::Item> {
         match self.rows.peek() {
-            Some(&(row_as_usize, walls)) => {
+            Some(&(row, walls)) => {
                 let item = match self.cols.next() {
                     Some(col) => {
-                        let row = row_as_usize.try_into().unwrap_or(u16::MAX);
                         Some((row, col, walls.cell_type(self.player, row, col)))
                     }
                     None => None, // edge case: zero-size Cycle
                 };
-                if let Some(0) = self.cols.peek() {
+                if let Some(next_col) = self.cols.peek()
+                    && next_col.is_zero()
+                {
                     self.rows.next(); // prepare for next row
                 }
                 item
@@ -136,26 +174,27 @@ impl TunnelIterator<'_> {
     }
 }
 
-impl Iterator for TunnelIterator<'_> {
-    type Item = TunnelIteratorItem;
-    fn next(&mut self) -> Option<Self::Item> {
-        self.choose()
+impl<'a, T: TunnelIndex> IntoIterator for &'a Tunnel<T> {
+    type Item = TunnelIteratorItem<T>;
+    type IntoIter = TunnelIterator<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
-#[derive(Clone, Copy)]
-struct TunnelWalls {
-    left_wall: u16,
-    gap_to_right_wall: u16,
+#[derive(Clone)]
+struct TunnelWalls<T> {
+    left_wall: T,
+    gap_to_right_wall: T,
 }
 
-impl TunnelWalls {
-    fn in_wall(&self, column: u16) -> bool {
+impl<T: TunnelIndex> TunnelWalls<T> {
+    fn in_wall(&self, column: T) -> bool {
         column <= self.left_wall
-            || column > self.left_wall + self.gap_to_right_wall
+            || column > self.left_wall.saturating_add(self.gap_to_right_wall)
     }
-    fn cell_type(&self, player: u16, row: u16, column: u16) -> TunnelCellType {
-        if row == 0 && column == player {
+    fn cell_type(&self, player: T, row: T, column: T) -> TunnelCellType {
+        if row.is_zero() && column == player {
             TunnelCellType::Player
         } else if self.in_wall(column) {
             TunnelCellType::Wall
@@ -169,22 +208,27 @@ impl TunnelWalls {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    type Idx = u8;
 
     struct MoveWallsPeriodically {
         b: bool,
-        count: u16,
-        period: u16,
+        count: Idx,
+        period: Idx,
     }
     impl TunnelBuilder for MoveWallsPeriodically {
-        fn choose_player_start(&mut self, max: u16) -> u16 {
-            if self.b { max.saturating_sub(2) } else { 1 }
+        fn choose_player_start<T: TunnelIndex>(&mut self, max: T) -> T {
+            if self.b {
+                max.saturating_sub(two())
+            } else {
+                one()
+            }
         }
         fn choose_step(&mut self) -> TunnelBuilderChoice {
             if self.b && self.count < self.period {
-                self.count += 1;
+                self.count += &one();
                 TunnelBuilderChoice::MoveLeftWall
-            } else if !self.b && self.count > 0 {
-                self.count -= 1;
+            } else if !self.b && self.count > zero() {
+                self.count -= &one();
                 TunnelBuilderChoice::MoveRightWall
             } else {
                 self.b = !self.b;
@@ -197,8 +241,8 @@ mod tests {
         b: bool,
     }
     impl TunnelBuilder for MoveWallsEvenly {
-        fn choose_player_start(&mut self, max: u16) -> u16 {
-            max / 2
+        fn choose_player_start<T: TunnelIndex>(&mut self, max: T) -> T {
+            max / two()
         }
         fn choose_step(&mut self) -> TunnelBuilderChoice {
             self.b = !self.b;
@@ -210,21 +254,32 @@ mod tests {
         }
     }
 
-    fn get_first_row(t: &Tunnel) -> Vec<TunnelCellType> {
+    fn get_first_row(t: &Tunnel<Idx>) -> Vec<TunnelCellType> {
         t.iter()
-            .filter(|(row, _, _)| *row == 0)
+            .filter(|(row, _, _)| *row == zero())
             .map(|(_, _, cell_type)| cell_type)
             .collect()
     }
 
-    const SIZE: u16 = 5;
-    const REPEAT_STEPS: usize = 8;
+    const SIZE: Idx = 5;
+    const REPEAT_STEPS: Idx = 8;
+
+    #[test]
+    fn implicit_loop_into_iterator_vs_explicit_iter_call() {
+        let mut builder = MoveWallsEvenly { b: true };
+        let t = Tunnel::new(&mut builder, SIZE, SIZE);
+        let mut count_into_iterator_loop: usize = zero();
+        for _ in &t {
+            count_into_iterator_loop += &one();
+        }
+        assert_eq!(count_into_iterator_loop, t.iter().count());
+    }
 
     #[test]
     fn always_move_left_wall() {
         let mut builder = MoveWallsPeriodically {
             b: true,
-            count: 0,
+            count: zero(),
             period: rows_to_loop_iterations(SIZE),
         };
         let mut t = Tunnel::new(&mut builder, SIZE, SIZE);
@@ -239,7 +294,7 @@ mod tests {
         ];
         assert_eq!(expected, get_first_row(&t));
 
-        for _ in 0..rows_to_loop_iterations(SIZE) {
+        for _ in zero_to(rows_to_loop_iterations(SIZE)) {
             t.step(&mut builder);
         }
         assert!(!t.is_collision());
@@ -273,7 +328,7 @@ mod tests {
         ];
         assert_eq!(expected, get_first_row(&t));
 
-        for _ in 0..rows_to_loop_iterations(SIZE) {
+        for _ in zero_to(rows_to_loop_iterations(SIZE)) {
             t.step(&mut builder);
         }
         assert!(!t.is_collision());
@@ -292,13 +347,13 @@ mod tests {
     fn continue_steps_down_narrow_tunnel() {
         let mut builder = MoveWallsPeriodically {
             b: true,
-            count: 0,
+            count: zero(),
             period: rows_to_loop_iterations(SIZE),
         };
         let mut t = Tunnel::new(&mut builder, SIZE, SIZE);
 
-        for _ in 0..REPEAT_STEPS {
-            for _ in 0..rows_to_loop_iterations(SIZE) {
+        for _ in zero_to(REPEAT_STEPS) {
+            for _ in zero_to(rows_to_loop_iterations(SIZE)) {
                 t.step(&mut builder);
             }
             assert!(!t.is_collision());
@@ -312,12 +367,12 @@ mod tests {
             ];
             assert_eq!(expected, get_first_row(&t));
 
-            for _ in 0..rows_to_loop_iterations(SIZE) {
+            for _ in zero_to(rows_to_loop_iterations(SIZE)) {
                 t.step(&mut builder);
             }
             assert!(t.is_collision());
 
-            for _ in 0..rows_to_loop_iterations(SIZE) {
+            for _ in zero_to(rows_to_loop_iterations(SIZE)) {
                 t.move_player_left();
             }
             assert!(!t.is_collision());
@@ -331,7 +386,7 @@ mod tests {
             ];
             assert_eq!(expected, get_first_row(&t));
 
-            for _ in 0..rows_to_loop_iterations(SIZE) {
+            for _ in zero_to(rows_to_loop_iterations(SIZE)) {
                 t.move_player_right();
             }
             assert!(t.is_collision());
@@ -339,21 +394,37 @@ mod tests {
     }
 
     #[test]
-    fn edge_case_size_zero_tunnel_no_underflow() {
+    fn no_underflow_on_invalid_tunnel_size_zero_rows() {
         let mut builder = MoveWallsEvenly { b: false };
-        let mut t = Tunnel::new(&mut builder, 0, 0);
+        let mut t = Tunnel::new(&mut builder, zero(), zero());
         assert!(!t.is_collision());
         assert!(get_first_row(&t).is_empty());
+        assert_eq!(t.iter().count(), zero());
 
         t.step(&mut builder);
         assert!(t.is_collision());
         assert!(get_first_row(&t).is_empty());
+        assert_eq!(t.iter().count(), zero());
     }
 
     #[test]
-    fn edge_case_size_one_tunnel_no_underflow() {
+    fn no_underflow_on_invalid_tunnel_size_zero_columns() {
+        let mut builder = MoveWallsEvenly { b: false };
+        let mut t = Tunnel::new(&mut builder, SIZE, zero());
+        assert!(t.is_collision());
+        assert!(get_first_row(&t).is_empty());
+        assert_eq!(t.iter().count(), zero());
+
+        t.step(&mut builder);
+        assert!(t.is_collision());
+        assert!(get_first_row(&t).is_empty());
+        assert_eq!(t.iter().count(), zero());
+    }
+
+    #[test]
+    fn no_underflow_on_invalid_tunnel_size_one() {
         let mut builder = MoveWallsEvenly { b: true };
-        let mut t = Tunnel::new(&mut builder, 1, 1);
+        let mut t = Tunnel::new(&mut builder, one(), one());
         assert!(!t.is_collision());
         assert!(get_first_row(&t).is_empty());
 
@@ -363,9 +434,9 @@ mod tests {
     }
 
     #[test]
-    fn edge_case_size_two_tunnel_no_underflow() {
+    fn no_underflow_on_invalid_tunnel_size_two() {
         let mut builder = MoveWallsEvenly { b: true };
-        let mut t = Tunnel::new(&mut builder, 2, 2);
+        let mut t = Tunnel::new(&mut builder, two(), two());
         assert!(!t.is_collision());
         assert!(get_first_row(&t).is_empty());
 
@@ -377,9 +448,9 @@ mod tests {
     }
 
     #[test]
-    fn minimum_valid_size_three_tunnel_no_underflow() {
+    fn no_underflow_on_small_yet_valid_tunnel_size_three() {
         let mut builder = MoveWallsEvenly { b: true };
-        let mut t = Tunnel::new(&mut builder, 3, 3);
+        let mut t = Tunnel::new(&mut builder, three(), three());
         assert!(!t.is_collision());
         assert!(get_first_row(&t).is_empty());
 
@@ -389,10 +460,28 @@ mod tests {
             TunnelCellType::Wall,
         ];
 
-        for _ in 0..REPEAT_STEPS {
+        for _ in zero_to(REPEAT_STEPS) {
             t.step(&mut builder);
             assert!(!t.is_collision());
             assert_eq!(expected, get_first_row(&t));
         }
+    }
+
+    #[test]
+    fn no_overflow_on_tunnel_size_greater_than_u8_max() {
+        let mut builder = MoveWallsEvenly { b: true };
+        // create rows and columns that barely fit into Tunnel<u8>
+        let mut t = Tunnel::<u8>::new(&mut builder, u8::MAX, u8::MAX);
+        // check precondition: Tunnel initially looks reasonable
+        assert!(t.iter().next().is_some());
+        let u8_max_as_usize = Into::<usize>::into(u8::MAX);
+        assert_eq!(t.iter().count() / u8_max_as_usize, (u8::MAX - 2).into());
+        // use private APIs to cause inconsistency: number_of_rows > u8::MAX
+        for _ in zero_to::<u8>(three()) {
+            t.add_one_row(&mut builder);
+        }
+        // exercise FromPrimitive::from_usize() overflowing narrower u8 value,
+        // resulting in empty-looking iter() that at least avoids crashing
+        assert!(t.iter().next().is_none());
     }
 }
