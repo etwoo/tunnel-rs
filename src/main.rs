@@ -9,20 +9,22 @@ use crossterm::{
 use rand::{Rng, rngs::ThreadRng};
 use std::cmp;
 use std::env;
-use std::error::Error;
-use std::fmt::{self, Display, Formatter};
 use std::io::{self, Write};
 use std::thread;
 use std::time::Duration;
-use tunnel::{Tunnel, TunnelBuilder, TunnelBuilderChoice, TunnelCellType};
+use tunnel::{
+    Tunnel, TunnelBuilder, TunnelBuilderChoice, TunnelCellType, TunnelIndex,
+};
+
+type Idx = u16; // for interop with crossterm::terminal::size()
 
 struct SimpleBuilder {
     rng: ThreadRng,
 }
 
 impl TunnelBuilder for SimpleBuilder {
-    fn choose_player_start(&mut self, max: u16) -> u16 {
-        max / 2
+    fn choose_player_start<T: TunnelIndex>(&mut self, max: T) -> T {
+        max / 2.into()
     }
     fn choose_step(&mut self) -> TunnelBuilderChoice {
         if self.rng.random_bool(0.5) {
@@ -33,10 +35,10 @@ impl TunnelBuilder for SimpleBuilder {
     }
 }
 
-fn display(t: &Tunnel, score_row: u16, game_score: u64) -> tunnel::Result {
+fn display(t: &Tunnel<Idx>, score_row: Idx, game_score: u64) -> tunnel::Result {
     let mut stdout = io::stdout();
     stdout.queue(Clear(ClearType::All))?;
-    for (row, col, cell_type) in t.iter() {
+    for (row, col, cell_type) in t {
         stdout.queue(cursor::MoveTo(col, row))?;
         match cell_type {
             TunnelCellType::Player => {
@@ -56,14 +58,14 @@ fn display(t: &Tunnel, score_row: u16, game_score: u64) -> tunnel::Result {
     Ok(())
 }
 
-fn demo_step(t: &mut Tunnel, timeout: Duration) {
+fn demo_step(t: &Tunnel<Idx>, timeout: Duration) -> PlayerInput {
     thread::sleep(timeout);
 
     let mut player = 0;
-    let mut safe_min = u16::MAX;
+    let mut safe_min = Idx::MAX;
     let mut safe_max = 0;
 
-    for (row, col, cell_type) in t.iter() {
+    for (row, col, cell_type) in t {
         if cell_type == TunnelCellType::Player {
             player = col;
         }
@@ -79,47 +81,41 @@ fn demo_step(t: &mut Tunnel, timeout: Duration) {
     let safe_goal = safe_min + safe_max.saturating_sub(safe_min) / 2;
 
     if player > safe_goal {
-        t.move_player_left()
+        PlayerInput::MoveLeft
     } else if player < safe_goal {
-        t.move_player_right()
+        PlayerInput::MoveRight
+    } else {
+        PlayerInput::Empty
     }
 }
 
-#[derive(Debug)]
-struct QuitError {}
-
-impl Display for QuitError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "player pressed quit key")
-    }
-}
-
-impl Error for QuitError {}
-
-fn keyboard_step(t: &mut Tunnel, timeout: Duration) -> tunnel::Result {
-    if event::poll(timeout)?
+fn keyboard_step(timeout: Duration) -> PlayerInput {
+    if event::poll(timeout).is_ok()
         && let Ok(event) = event::read()
         && let Some(key) = event.as_key_press_event()
     {
         match key.code {
-            KeyCode::Char('c' | 'q') => {
-                return Err(Box::new(QuitError {}));
-            }
-            KeyCode::Left => {
-                t.move_player_left();
-            }
-            KeyCode::Right => {
-                t.move_player_right();
-            }
-            _ => {}
+            KeyCode::Char('c' | 'q') => PlayerInput::Quit,
+            KeyCode::Left => PlayerInput::MoveLeft,
+            KeyCode::Right => PlayerInput::MoveRight,
+            _ => PlayerInput::Empty,
         }
+    } else {
+        PlayerInput::Empty
     }
-    Ok(())
 }
 
+#[derive(PartialEq)]
 enum PlayerType {
     SelfDemo,
     Keyboard,
+}
+
+enum PlayerInput {
+    Empty,
+    MoveLeft,
+    MoveRight,
+    Quit,
 }
 
 fn main() -> tunnel::Result {
@@ -142,25 +138,29 @@ fn main() -> tunnel::Result {
     loop {
         display(&game_state, rows - 1, game_score)?;
 
-        match player_type {
-            PlayerType::SelfDemo => {
-                if game_score == 200 {
-                    game_over_message = "Demo complete!".to_string();
-                    break;
-                }
-                demo_step(&mut game_state, timeout);
-            }
-            PlayerType::Keyboard => {
-                if let Err(e) = keyboard_step(&mut game_state, timeout) {
-                    game_over_message = format!("Quitting because {e} ...");
-                    break;
-                }
+        if player_type == PlayerType::SelfDemo && game_score == 200 {
+            game_over_message = "Demo complete!";
+            break;
+        }
+
+        let player_input = match player_type {
+            PlayerType::SelfDemo => demo_step(&game_state, timeout),
+            PlayerType::Keyboard => keyboard_step(timeout),
+        };
+
+        match player_input {
+            PlayerInput::Empty => {}
+            PlayerInput::MoveLeft => game_state.move_player_left(),
+            PlayerInput::MoveRight => game_state.move_player_right(),
+            PlayerInput::Quit => {
+                game_over_message = "Quitting ...";
+                break;
             }
         }
 
         game_state.step(&mut level_builder);
         if game_state.is_collision() {
-            game_over_message = "Game over!".to_string();
+            game_over_message = "Game over!";
             break;
         }
 
