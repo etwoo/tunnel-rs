@@ -35,7 +35,7 @@ impl TunnelBuilder for SimpleBuilder {
     }
 }
 
-fn display(t: &Tunnel<Idx>, score_row: Idx, game_score: u64) -> tunnel::Result {
+fn display(t: &Tunnel<Idx>, score_row: Idx, game_score: u64) -> io::Result<()> {
     let mut stdout = io::stdout();
     stdout.queue(Clear(ClearType::All))?;
     for (row, col, cell_type) in t {
@@ -118,7 +118,7 @@ enum PlayerInput {
     Quit,
 }
 
-fn main() -> tunnel::Result {
+fn main() -> io::Result<()> {
     let (player_type, timeout) = if env::args().any(|x| x == "--demo") {
         (PlayerType::SelfDemo, Duration::from_millis(100))
     } else {
