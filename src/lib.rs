@@ -6,8 +6,6 @@ use num::{FromPrimitive, PrimInt, Unsigned, traits::NumAssign};
 use std::collections::{VecDeque, vec_deque::Iter as VecDequeIterator};
 use std::iter::{Cycle, Peekable, Zip, zip};
 
-pub type Result = std::result::Result<(), Box<dyn std::error::Error>>;
-
 pub trait TunnelIndex:
     From<u8> + FromPrimitive + NumAssign + PrimInt + Unsigned
 {
