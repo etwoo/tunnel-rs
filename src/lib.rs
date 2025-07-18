@@ -112,16 +112,14 @@ impl<T: TunnelIndex> Tunnel<T> {
         self.walls.pop_front();
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (T, T, TunnelCellType)> {
+    pub gen fn iter(&self) -> (T, T, TunnelCellType) {
         let w_len = match FromPrimitive::from_usize(self.walls.len()) {
             Some(val) => val,
             None => zero(),
         };
-        gen move {
-            for (row, walls) in zero_to(w_len).zip(self.walls.iter()) {
-                for col in zero_to(self.screen_width) {
-                    yield (row, col, walls.cell_type(self.player, row, col))
-                }
+        for (row, walls) in zero_to(w_len).zip(self.walls.iter()) {
+            for col in zero_to(self.screen_width) {
+                yield (row, col, walls.cell_type(self.player, row, col))
             }
         }
     }
