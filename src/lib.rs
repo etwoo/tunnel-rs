@@ -1,10 +1,11 @@
+// https://github.com/rust-lang/rust/issues/43122
+// https://github.com/rust-lang/rust/issues/117078
+#![feature(gen_blocks, yield_expr)]
 // https://github.com/taiki-e/cargo-llvm-cov#exclude-code-from-coverage
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-use num::iter::Range as NumRange; // clearly distinguish from std::ops::Range
 use num::{FromPrimitive, PrimInt, Unsigned, traits::NumAssign};
-use std::collections::{VecDeque, vec_deque::Iter as VecDequeIterator};
-use std::iter::{Cycle, Peekable, Zip, zip};
+use std::collections::VecDeque;
 
 pub trait TunnelIndex:
     From<u8> + FromPrimitive + NumAssign + PrimInt + Unsigned
@@ -32,11 +33,11 @@ fn rows_to_loop_iterations<T: TunnelIndex>(rows: T) -> T {
     rows.saturating_sub(three())
 }
 
-fn zero_to<T: TunnelIndex>(max: T) -> NumRange<T> {
+fn zero_to<T: TunnelIndex>(max: T) -> impl Iterator<Item = T> {
     num::range(zero(), max)
 }
 
-pub struct Tunnel<T: TunnelIndex> {
+pub struct Tunnel<T> {
     player: T,
     screen_width: T,
     walls: VecDeque<TunnelWalls<T>>,
@@ -111,15 +112,17 @@ impl<T: TunnelIndex> Tunnel<T> {
         self.walls.pop_front();
     }
 
-    pub fn iter<'a>(&'a self) -> TunnelIterator<'a, T> {
+    pub fn iter(&self) -> impl Iterator<Item = (T, T, TunnelCellType)> {
         let w_len = match FromPrimitive::from_usize(self.walls.len()) {
             Some(val) => val,
             None => zero(),
         };
-        TunnelIterator {
-            player: self.player,
-            rows: zip(zero_to(w_len), self.walls.iter()).peekable(),
-            cols: zero_to(self.screen_width).cycle().peekable(),
+        gen move {
+            for (row, walls) in zero_to(w_len).zip(self.walls.iter()) {
+                for col in zero_to(self.screen_width) {
+                    yield (row, col, walls.cell_type(self.player, row, col))
+                }
+            }
         }
     }
 }
@@ -139,45 +142,6 @@ pub enum TunnelCellType {
     Player,
     Floor,
     Wall,
-}
-
-type TunnelIteratorItem<T> = (T, T, TunnelCellType);
-
-pub struct TunnelIterator<'a, T: TunnelIndex> {
-    player: T,
-    rows: Peekable<Zip<NumRange<T>, VecDequeIterator<'a, TunnelWalls<T>>>>,
-    cols: Peekable<Cycle<NumRange<T>>>,
-}
-
-impl<T: TunnelIndex> Iterator for TunnelIterator<'_, T> {
-    type Item = TunnelIteratorItem<T>;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.rows.peek() {
-            Some(&(row, walls)) => {
-                let item = match self.cols.next() {
-                    Some(col) => {
-                        Some((row, col, walls.cell_type(self.player, row, col)))
-                    }
-                    None => None, // edge case: zero-size Cycle
-                };
-                if let Some(next_col) = self.cols.peek()
-                    && next_col.is_zero()
-                {
-                    self.rows.next(); // prepare for next row
-                }
-                item
-            }
-            None => None, // consumed all available rows
-        }
-    }
-}
-
-impl<'a, T: TunnelIndex> IntoIterator for &'a Tunnel<T> {
-    type Item = TunnelIteratorItem<T>;
-    type IntoIter = TunnelIterator<'a, T>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
 }
 
 #[derive(Clone)]
@@ -261,17 +225,6 @@ mod tests {
 
     const SIZE: Idx = 5;
     const REPEAT_STEPS: Idx = 8;
-
-    #[test]
-    fn implicit_loop_into_iterator_vs_explicit_iter_call() {
-        let mut builder = MoveWallsEvenly { b: true };
-        let t = Tunnel::new(&mut builder, SIZE, SIZE);
-        let mut count_into_iterator_loop: usize = zero();
-        for _ in &t {
-            count_into_iterator_loop += &one();
-        }
-        assert_eq!(count_into_iterator_loop, t.iter().count());
-    }
 
     #[test]
     fn always_move_left_wall() {
