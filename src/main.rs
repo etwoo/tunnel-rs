@@ -38,7 +38,7 @@ impl TunnelBuilder for SimpleBuilder {
 fn display(t: &Tunnel<Idx>, score_row: Idx, game_score: u64) -> io::Result<()> {
     let mut stdout = io::stdout();
     stdout.queue(Clear(ClearType::All))?;
-    for (row, col, cell_type) in t {
+    for (row, col, cell_type) in t.iter() {
         stdout.queue(cursor::MoveTo(col, row))?;
         match cell_type {
             TunnelCellType::Player => {
@@ -65,7 +65,7 @@ fn demo_step(t: &Tunnel<Idx>, timeout: Duration) -> PlayerInput {
     let mut safe_min = Idx::MAX;
     let mut safe_max = 0;
 
-    for (row, col, cell_type) in t {
+    for (row, col, cell_type) in t.iter() {
         if cell_type == TunnelCellType::Player {
             player = col;
         }

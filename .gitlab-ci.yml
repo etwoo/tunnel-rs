@@ -1,3 +1,5 @@
+image: rustlang/rust:nightly
+
 variables:
   RUSTFLAGS: "-Dwarnings"
   CARGO_OPTIONS: "--all-targets --all-features"
@@ -6,7 +8,7 @@ variables:
   - curl -LsSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
   - cargo binstall cargo-nextest
 
-.build_template: &build_template
+build:nightly:
   stage: build
   before_script:
     - *nextest_dependencies
@@ -17,18 +19,9 @@ variables:
     reports:
       junit: ./target/nextest/default/junit.xml
 
-build:stable:
-  image: rust:latest
-  <<: *build_template
-
-build:nightly:
-  image: rustlang/rust:nightly
-  <<: *build_template
-
 # Based on https://github.com/taiki-e/cargo-llvm-cov#gitlab-ci
 build:coverage:
   stage: build
-  image: rustlang/rust:nightly
   before_script:
     - *nextest_dependencies
   script:
@@ -46,14 +39,12 @@ build:coverage:
 
 check:clippy:
   stage: build
-  image: rust:latest
   script:
     - rustup component add clippy
     - cargo clippy $CARGO_OPTIONS
 
 check:format:
   stage: build
-  image: rust:latest
   script:
     - rustup component add rustfmt
     - cargo fmt --check
