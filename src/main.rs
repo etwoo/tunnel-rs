@@ -90,7 +90,7 @@ fn demo_step(t: &Tunnel<Idx>, timeout: Duration) -> PlayerInput {
 }
 
 fn keyboard_step(timeout: Duration) -> PlayerInput {
-    if event::poll(timeout).is_ok()
+    if let Ok(true) = event::poll(timeout)
         && let Ok(event) = event::read()
         && let Some(key) = event.as_key_press_event()
     {
